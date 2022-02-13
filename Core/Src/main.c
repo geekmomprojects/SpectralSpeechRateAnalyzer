@@ -221,19 +221,21 @@ void wheel(uint8_t index, uint8_t *r, uint8_t *g, uint8_t *b) {
 #define MAX_COLUMN_VAL		LED_COLUMN_HEIGHT - 1
 // Plots a spectrogram to leds
 void plotFFTData(uint16_t *dataBuff, uint16_t numPoints) {
-	static uint8_t	color_index = 0;
+
+	const  uint8_t	spectrum_colors[LED_COLUMN_HEIGHT][3] = {{51,153,255},{51,255,255},{51,255,153},{51,255,51},{153,255,51},{255,255,51},{255,153,51},{255,51,51}};
+	uint8_t			*color_index;
 	int16_t 		binsize, max_amplitude = 1024;
+	uint8_t			attenuate = 11;
 	uint8_t			i, scaled_amplitude;
 	uint8_t			r, g, b;
 
 	binsize = numPoints/NUM_BINS;
-	color_index = (color_index + 1) % 255;
-	wheel(color_index, &r, &g, &b);
 	led_set_all_RGB(0,0,0);
 	// scale to height of 8 and plot
 	for (i = 0; i < NUM_BINS; i++) {
-		scaled_amplitude = (uint8_t) fmin((dataBuff[i*binsize+1]*LED_COLUMN_HEIGHT) >> 10, MAX_COLUMN_VAL);
-		led_set_RGB(i*8 + scaled_amplitude, r, g, b);
+		scaled_amplitude = (uint8_t) fmin((dataBuff[i*binsize+1]*LED_COLUMN_HEIGHT) >> attenuate, MAX_COLUMN_VAL);
+		color_index = spectrum_colors[scaled_amplitude];
+		led_set_RGB(i*8 + scaled_amplitude, color_index[0], color_index[1], color_index[2]);
 	}
 	led_render();
 }
