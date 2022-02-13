@@ -1,0 +1,2 @@
+stm32l5xx_hal_dfsdm_ex.c:70:19:HAL_DFDSMEx_ChannelSetPulsesSkipping	24	static
+stm32l5xx_hal_dfsdm_ex.c:96:19:HAL_DFDSMEx_ChannelGetPulsesSkipping	24	static
