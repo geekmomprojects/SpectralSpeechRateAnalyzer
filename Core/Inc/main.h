@@ -57,10 +57,12 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define USART3_RX_Pin GPIO_PIN_11
-#define USART3_RX_GPIO_Port GPIOC
-#define USART3_TX_Pin GPIO_PIN_10
-#define USART3_TX_GPIO_Port GPIOC
+#define GREEN_LED_Pin GPIO_PIN_12
+#define GREEN_LED_GPIO_Port GPIOG
+#define UART3_RX_Pin GPIO_PIN_11
+#define UART3_RX_GPIO_Port GPIOC
+#define UART3_TX_Pin GPIO_PIN_10
+#define UART3_TX_GPIO_Port GPIOC
 #define PUSH_BUTTON_Pin GPIO_PIN_13
 #define PUSH_BUTTON_GPIO_Port GPIOC
 #define PUSH_BUTTON_EXTI_IRQn EXTI13_IRQn

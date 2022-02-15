@@ -45,8 +45,7 @@
 
 #define	FFT_LENGTH			512
 #define HALF_FFT_LENGTH		256
-#define	BINSIZE				8
-#define DECIMATED_LENGTH	HALF_FFT_LENGTH/BINSIZE
+#define DECIMATED_LENGTH	32
 
 #define HALF_BUFFER_SIZE	FFT_LENGTH
 #define BUFFER_SIZE			2*FFT_LENGTH
@@ -61,8 +60,8 @@
 //#define 	SEND_UART_FFT_DATA
 
 #define LED_ROWS			8
-#define LED_COLS			16
-#define	NUM_LEDS			LED_ROWS*LED_COLS
+#define LED_COLS			32
+
 
 #ifdef SEND_UART_FFT_DATA
 	#define OUTPUT BUFFER_SIZE	HALF_BUFFER_SIZE/2
@@ -78,6 +77,7 @@
 
 /* USER CODE BEGIN PV */
 
+enum {DATA_MODE, INPUT_MODE};
 int32_t 					 RecBuff[BUFFER_SIZE];
 __IO uint32_t                DmaRecHalfBuffCplt  = 0;
 __IO uint32_t                DmaRecBuffCplt      = 0;
@@ -85,10 +85,18 @@ __IO uint32_t				 DmaSentHalfBuffCplt = 1;
 __IO uint32_t				 DmaSentBuffCplt     = 1;
 __IO uint32_t				 DoSerialOutput 	 = 1;
 __IO uint32_t				 debouncing 	 	 = 0;
+__IO uint32_t				 RXDataIncoming 	 = 0;
+__IO uint32_t				 RXDataComplete   	 = 0;
+__IO uint32_t				 rxIndex			 = 0;
+__IO uint32_t				 OperatingMode		 = DATA_MODE;
 
 
 HAL_StatusTypeDef 			 sts;
+// Buffer to receive user commands via USART
+char						 rxByte;
+char						 rxBuff[64];
 char						 commBuff[256];
+// Buffer to send FFT Data to computer over serial
 char						 OutBuff[OUTPUT_BUFFER_SIZE];
 
 #ifdef 	DO_FFT
@@ -122,19 +130,14 @@ void printArgAddress(int32_t arg) {
 	}
 }
 */
-float complexABS(float real, float compl) {
-	return sqrt(real*real+compl*compl);
-}
-
 
 #ifdef DO_FFT
 void DoFFT(float32_t*	inBuff, float32_t*	outBuff, float32_t* powerBuff, arm_rfft_fast_instance_f32* handler) {
-	int16_t		i;
-	float32_t	offset;
+	// int16_t		i;
 	// Do FFT
 	arm_rfft_fast_f32(handler, inBuff, outBuff, 0);
-	offset = outBuff[0];
-	// Compute magnitude of the complex return values
+	// Compute magnitude of the complex return values. powerBuff has half the number
+	//  of elements of inBuff/outBuff
 	arm_cmplx_mag_f32(outBuff, powerBuff, HALF_FFT_LENGTH);
 	// Convert to DB
 	//for (i = 0; i < HALF_FFT_LENGTH/2; i++) {
@@ -144,19 +147,19 @@ void DoFFT(float32_t*	inBuff, float32_t*	outBuff, float32_t* powerBuff, arm_rfft
 #endif
 
 // Uncomment only one of the options below to choose the
-// metric (total value or max value) to evaluate the data
+// method used (total, max or average) to use to aggregate the data
 // in each bin
 // #define DECIMATE_WITH_TOTAL
 //   #define DECIMATE_WITH_MAX
  #define DECIMATE_WITH_AVERAGE
-uint16_t DecimateFFTData(float32_t *dataBuff, uint16_t* decimatedBuff, char* outBuff, uint32_t npoints, uint32_t binsize) {
-	uint16_t 	i, j, nbins;
+uint16_t DecimateFFTData(float32_t *dataBuff, uint16_t* decimatedBuff, char* outBuff, uint16_t npoints, uint16_t nbins) {
+	uint16_t 	i, j, binsize;
 	float32_t 	metric;	// Either total or max
 	char		*outBuffPtr;
 	float32_t 	*dataBuffPtr;
 
-	nbins = (uint16_t) npoints/binsize;
 	outBuffPtr = outBuff;
+	binsize = npoints/nbins;
 	for (i = 0; i < nbins; i++) {
 		metric = 0;
 		dataBuffPtr = dataBuff + i*binsize;
@@ -181,6 +184,25 @@ uint16_t DecimateFFTData(float32_t *dataBuff, uint16_t* decimatedBuff, char* out
 	return outBuffPtr - outBuff; // return #characters in string to send
 }
 
+
+// Returns the audio sampling frequency by the DFSDM, along with min, max frequencies shown
+// and the width of a bin in Hz
+float32_t	getSamplingRate(float32_t *fmin, float32_t *fmax, float32_t *fbin) {
+	// Should probably be reading these values from various bits in DFSDM configuration registers,
+	// but this way is much easier to finish in the limited time available
+	const float32_t clockRate 	=	48000000;	// Audio clock rate
+	float32_t	foic 			= 	hdfsdm1_filter0.Init.FilterParam.Oversampling;
+	float32_t	integ 			= 	hdfsdm1_filter0.Init.FilterParam.IntOversampling;
+	float32_t	div				= 	hdfsdm1_channel1.Init.OutputClock.Divider;
+	float32_t 	samplingRate 	= 	clockRate/(foic*integ*div);
+	*fmin = 0;
+	*fmax = samplingRate/2;
+	*fbin = (fmax - fmin)/DECIMATED_LENGTH;
+	return samplingRate;
+}
+
+// Standard cyclic rainbow spectrum generator function with uint8_t input
+// Adapted from Adafruit
 void wheel(uint8_t index, uint8_t *r, uint8_t *g, uint8_t *b) {
 	index = 255 - index;
 	if (index < 85) {
@@ -216,26 +238,30 @@ void wheel(uint8_t index, uint8_t *r, uint8_t *g, uint8_t *b) {
  * A = 880 = 35
  */
 
-#define NUM_BINS	16
+#define NUM_BINS	32
 #define LED_COLUMN_HEIGHT	8
 #define MAX_COLUMN_VAL		LED_COLUMN_HEIGHT - 1
 // Plots a spectrogram to leds
 void plotFFTData(uint16_t *dataBuff, uint16_t numPoints) {
 
-	const  uint8_t	spectrum_colors[LED_COLUMN_HEIGHT][3] = {{51,153,255},{51,255,255},{51,255,153},{51,255,51},{153,255,51},{255,255,51},{255,153,51},{255,51,51}};
-	uint8_t			*color_index;
-	int16_t 		binsize, max_amplitude = 1024;
+	const  	uint8_t			spectrum_colors[LED_COLUMN_HEIGHT][3] =
+											{{17,51,81},{17,81,81},{17,81,51},{17,81,17},
+											 {51,81,17},{81,81,17},{81,51,17},{81,17,17}};
+	const 	uint8_t			*color_index;
+	int16_t 		binsize;
 	uint8_t			attenuate = 11;
 	uint8_t			i, scaled_amplitude;
-	uint8_t			r, g, b;
 
 	binsize = numPoints/NUM_BINS;
 	led_set_all_RGB(0,0,0);
-	// scale to height of 8 and plot
-	for (i = 0; i < NUM_BINS; i++) {
-		scaled_amplitude = (uint8_t) fmin((dataBuff[i*binsize+1]*LED_COLUMN_HEIGHT) >> attenuate, MAX_COLUMN_VAL);
+	// scale to height of 8 and plot - alternating columns run opposite directions
+	for (i = 0; i < NUM_BINS; i += 2) {
+		scaled_amplitude = (uint8_t) fmin((dataBuff[NUM_BINS - i - 1]*LED_COLUMN_HEIGHT) >> attenuate, MAX_COLUMN_VAL);
 		color_index = spectrum_colors[scaled_amplitude];
-		led_set_RGB(i*8 + scaled_amplitude, color_index[0], color_index[1], color_index[2]);
+		led_set_RGB(i*LED_COLUMN_HEIGHT + scaled_amplitude, color_index[0], color_index[1], color_index[2]);
+		scaled_amplitude = (uint8_t) fmin((dataBuff[NUM_BINS - i]*LED_COLUMN_HEIGHT) >> attenuate, MAX_COLUMN_VAL);
+		color_index = spectrum_colors[scaled_amplitude];
+		led_set_RGB((i+2)*8 - (scaled_amplitude+1), color_index[0], color_index[1], color_index[2]);
 	}
 	led_render();
 }
@@ -273,14 +299,9 @@ int main(void)
 	  uint32_t 		i;
 	  int32_t		satVal;
 	  uint16_t 		outStringLen;
-#ifdef SEND_UART_RAW_DATA
-	  char* 		outBuffPtr;
-#endif
-#ifdef DO_FFT
 	  float32_t*	fftBuffPtr;
-	  float32_t		average;
-#endif
-	  const uint8_t ATTENUATION = 6;
+	  float32_t		average, srate, fmin, fmax, fbin;
+	  const uint8_t ATTENUATION =8;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -341,11 +362,18 @@ int main(void)
   while (1)
   {
 
+	  	if (RXDataIncoming) {
+    		sts = HAL_UART_Receive_IT(&huart3, &rxByte, 1);
+    		RXDataIncoming = 0;
+	  	} else if  (RXDataComplete) {
+	  		srate = getSamplingRate(&fmin, &fmax, &fbin);
+	  		sprintf(commBuff, "Sampling rate = %12.2f Hz\r\nMin freq = %12.2f Hz\r\n Max freq = %12.2f Hz\r\n Freq bin size = %12.2f Hz\r\n", srate, fmin, fmax, fbin);
+	    	HAL_UART_Transmit_DMA(&huart3, (uint8_t *) commBuff, strlen(commBuff));
+	    	RXDataComplete = 0;
+	    }
 
 	    if(DmaRecHalfBuffCplt == 1)
 	    {
-	    	//BSP_LED_Toggle(LED_RED);
-#ifdef DO_FFT
 	    	fftBuffPtr = FFTInBuff;
 	    	average = 0;
 	    	/* Store values on Play buff */
@@ -354,72 +382,38 @@ int main(void)
 	    		satVal 			  = SaturaLH((RecBuff[i] >> ATTENUATION), -32768, 32767);
 	    		// Copy the value into the FFT Array
 	    		*(fftBuffPtr++) = satVal;
-#ifdef REMOVE_AVERAGE
-	    		average += satVal;
 	    	}
-	    	// Subract the average to zero the data
-	    	average /= HALF_BUFFER_SIZE;
-	    	for(i = 0; i < HALF_BUFFER_SIZE; i++) {
-	    		FFTInBuff[i] -= average;
-	    	}
-#else
-	    	}
-#endif
-	    	DoFFT(FFTInBuff, FFTOutBuff, PowerBuff, &fft_handler);
 
-	    	outStringLen = DecimateFFTData(PowerBuff, DecimatedBuff, OutBuff, HALF_FFT_LENGTH, BINSIZE);
+	    	DoFFT(FFTInBuff, FFTOutBuff, PowerBuff, &fft_handler);
+	    	outStringLen = DecimateFFTData(PowerBuff, DecimatedBuff, OutBuff, HALF_FFT_LENGTH, LED_COLS);
 	    	// only send data if resource is free - otherwise skip
 			if (DoSerialOutput) {
-				if (DmaSentBuffCplt) {
-					  DmaSentBuffCplt = 0;
+				if (DmaSentHalfBuffCplt) {
+					  DmaSentHalfBuffCplt = 0;
 					  HAL_UART_Transmit_DMA(&huart3, (uint8_t *) OutBuff, outStringLen);
 				  }
 			}
 
 			plotFFTData(DecimatedBuff, DECIMATED_LENGTH);
 			//ledTest();
-#endif
-#ifdef SEND_UART_RAW_DATA
-	    	outBuffPtr = OutBuff;
-	    	for(i = 0; i < HALF_BUFFER_SIZE; i++)
-	    	{
-	    		satVal 			  = SaturaLH((RecBuff[i] >> ATTENUATION), -32768, 32767);
-	    		// Just copy the value over to send it back out
-	    		// Format data for UART
-	    		sprintf(outBuffPtr, "%ld\r\n", satVal);
-	    		outBuffPtr += strlen(outBuffPtr);
-	    	}
-	    	HAL_UART_Transmit_DMA(&huart3, (uint8_t *) OutBuff, (uint16_t)(outBuffPtr - OutBuff));
-#endif
 	    	DmaRecHalfBuffCplt  = 0;
   	  }
 	  if(DmaRecBuffCplt == 1)
 	  {
-#ifdef DO_FFT
+
 		  fftBuffPtr = FFTInBuff;
 		  /* Store values on Play buff */
 		  average = 0;
-		  for(i = HALF_BUFFER_SIZE; i < 2*HALF_BUFFER_SIZE; i++)
+		  for(i = HALF_BUFFER_SIZE; i < BUFFER_SIZE; i++)
 	      {
 			  	satVal 			  = SaturaLH((RecBuff[i] >> ATTENUATION), -32768, 32767);
 			  	*(fftBuffPtr++) = satVal;
-#ifdef REMOVE_AVERAGE
-			  	average += satVal;
-	      }
-		  // Subract average value
-		  average /= HALF_BUFFER_SIZE;
-		  for (i = 0; i < HALF_BUFFER_SIZE; i++) {
-			  FFTInBuff[i] -= average;
-		  }
-#else
 	  	  }
-#endif
-		  // only send data if buffer is free, otherwise skip
+
 		  DoFFT(FFTInBuff, FFTOutBuff, PowerBuff, &fft_handler);
-
-
-		  outStringLen = DecimateFFTData(PowerBuff, DecimatedBuff, OutBuff, HALF_FFT_LENGTH, BINSIZE);
+		  outStringLen = DecimateFFTData(PowerBuff, DecimatedBuff, OutBuff, HALF_FFT_LENGTH, LED_ROWS);
 		  if (DoSerialOutput) {
+			  // only send data if buffer is free, otherwise skip
 			  if (DmaSentBuffCplt) {
 				  DmaSentBuffCplt = 0;
 				  HAL_UART_Transmit_DMA(&huart3, (uint8_t *) OutBuff, outStringLen);
@@ -428,20 +422,6 @@ int main(void)
 
 		  plotFFTData(DecimatedBuff, DECIMATED_LENGTH);
 		  //ledTest();
-#endif
-#ifdef SEND_UART_RAW_DATA
-		  outBuffPtr = OutBuff + OUTPUT_BUFFER_SIZE/2;
-		  /* Store values on Play buff */
-		  for(i = HALF_BUFFER_SIZE; i < 2*HALF_BUFFER_SIZE; i++)
-	      {
-			  	satVal 			  = SaturaLH((RecBuff[i] >> ATTENUATION), -32768, 32767);
-	    		// Format data for UART
-			  	sprintf(outBuffPtr, "%ld\r\n", satVal);
-	    		outBuffPtr += strlen(outBuffPtr);
-	      }
-		  //Send data string to UART
-	      HAL_UART_Transmit_DMA(&huart3, (uint8_t *) (OutBuff + OUTPUT_BUFFER_SIZE/2), (uint16_t)(outBuffPtr - (OUTPUT_BUFFER_SIZE/2 + OutBuff)));
-#endif
 	      DmaRecBuffCplt  = 0;
 	  }
     /* USER CODE END WHILE */
@@ -590,6 +570,36 @@ void HAL_UART_TxHalfCpltCallback(UART_HandleTypeDef *huart)
 }
 
 /**
+  * @brief  Rx Transfer completed callback.
+  * @param  huart UART handle.
+  * @retval None
+  */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+ 	if (huart == &huart3) {
+		// If no data is being received, clear the buffer
+		// Right now just toggle LED to see if anything is noticed
+	    //Toggle LED10
+	    HAL_GPIO_TogglePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin);
+	    // Enable receiving of data via UART and interrupt notification
+
+	    if (!DoSerialOutput) {
+	    	RXDataIncoming = 1;
+	    	if (rxByte == '\r') {
+	    		rxBuff[rxIndex] = '\0';
+	    		// Now respond to input
+	    		RXDataComplete = 1;
+	    		rxIndex = 0;
+	    	} else {
+	    		rxBuff[rxIndex++] = rxByte;
+	    	}
+	    } else {
+	    	RXDataIncoming = 0;
+	    }
+	}
+}
+
+/**
   * @brief  EXTI line rising detection callback.
   * @param  GPIO_Pin Specifies the port pin connected to corresponding EXTI line.
   * @retval None
@@ -621,6 +631,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 		// If we're here, the button is debounced and we should toggle the state
 		if (HAL_GPIO_ReadPin(GPIOC, 13) == GPIO_PIN_RESET) {	// Button is pushed
 			DoSerialOutput = !DoSerialOutput;
+			if (!DoSerialOutput) {
+				// Enable receiving of data via UART and interrupt notification
+				RXDataIncoming = 1;
+			} else {
+				RXDataIncoming = 0;
+			}
 		}
 	}
 }

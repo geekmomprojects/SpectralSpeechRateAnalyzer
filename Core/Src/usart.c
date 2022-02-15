@@ -44,7 +44,7 @@ void MX_USART3_UART_Init(void)
   huart3.Init.WordLength = UART_WORDLENGTH_8B;
   huart3.Init.StopBits = UART_STOPBITS_1;
   huart3.Init.Parity = UART_PARITY_NONE;
-  huart3.Init.Mode = UART_MODE_TX;
+  huart3.Init.Mode = UART_MODE_TX_RX;
   huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart3.Init.OverSampling = UART_OVERSAMPLING_16;
   huart3.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
@@ -99,16 +99,16 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     PC11     ------> USART3_RX
     PC10     ------> USART3_TX
     */
-    GPIO_InitStruct.Pin = USART3_RX_Pin|USART3_TX_Pin;
+    GPIO_InitStruct.Pin = UART3_RX_Pin|UART3_TX_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF7_USART3;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
     /* USART3 DMA Init */
     /* USART3_TX Init */
-    hdma_usart3_tx.Instance = DMA1_Channel3;
+    hdma_usart3_tx.Instance = DMA1_Channel2;
     hdma_usart3_tx.Init.Request = DMA_REQUEST_USART3_TX;
     hdma_usart3_tx.Init.Direction = DMA_MEMORY_TO_PERIPH;
     hdma_usart3_tx.Init.PeriphInc = DMA_PINC_DISABLE;
@@ -153,7 +153,7 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
     PC11     ------> USART3_RX
     PC10     ------> USART3_TX
     */
-    HAL_GPIO_DeInit(GPIOC, USART3_RX_Pin|USART3_TX_Pin);
+    HAL_GPIO_DeInit(GPIOC, UART3_RX_Pin|UART3_TX_Pin);
 
     /* USART3 DMA DeInit */
     HAL_DMA_DeInit(uartHandle->hdmatx);
