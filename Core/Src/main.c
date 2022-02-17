@@ -43,13 +43,13 @@
 /* USER CODE BEGIN PD */
 #define 	DO_FFT
 
-#define	FFT_LENGTH			512
-#define HALF_FFT_LENGTH		256
-#define DECIMATED_LENGTH	32
+#define	FFT_LENGTH				512
+#define HALF_FFT_LENGTH			256
+#define NUM_DISPLAY_BINS		32  // Width of data display
 
-#define HALF_BUFFER_SIZE	FFT_LENGTH
-#define BUFFER_SIZE			2*FFT_LENGTH
-#define OUTPUT_BUFFER_SIZE	BUFFER_SIZE*8
+#define HALF_BUFFER_SIZE		FFT_LENGTH
+#define BUFFER_SIZE				2*FFT_LENGTH
+#define OUTPUT_BUFFER_SIZE		BUFFER_SIZE*8  // Safety margin probably too big here
 //#define REMOVE_AVERAGE
 
 // Define this to send the data to the uart
@@ -60,7 +60,7 @@
 //#define 	SEND_UART_FFT_DATA
 
 #define LED_ROWS			8
-#define LED_COLS			32
+#define LED_COLS			32	// Should be same as NUM_DISPLAY_BINS
 
 
 #ifdef SEND_UART_FFT_DATA
@@ -71,13 +71,12 @@
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 #define SaturaLH(N, L, H) (((N)<(L))?(L):(((N)>(H))?(H):(N)))
+#define constrain(amt,low,high) ((amt)<(low)?(low):((amt)>(high)?(high):(amt)))
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
-enum {DATA_MODE, INPUT_MODE};
 int32_t 					 RecBuff[BUFFER_SIZE];
 __IO uint32_t                DmaRecHalfBuffCplt  = 0;
 __IO uint32_t                DmaRecBuffCplt      = 0;
@@ -88,9 +87,13 @@ __IO uint32_t				 debouncing 	 	 = 0;
 __IO uint32_t				 RXDataIncoming 	 = 0;
 __IO uint32_t				 RXDataComplete   	 = 0;
 __IO uint32_t				 rxIndex			 = 0;
-__IO uint32_t				 OperatingMode		 = DATA_MODE;
+__IO char					 RXCmd				 = 0;
 
-
+volatile 	uint16_t		 DisplayBinWidth 	 = HALF_FFT_LENGTH/LED_COLS;
+const  		uint8_t			 RowColors[LED_ROWS][3] =
+										{{17,51,81},{17,81,81},{17,81,51},{17,81,17},
+										 {51,81,17},{81,81,17},{81,51,17},{81,17,17}};
+uint8_t						 ColumnColors[LED_COLS][3];
 HAL_StatusTypeDef 			 sts;
 // Buffer to receive user commands via USART
 char						 rxByte;
@@ -103,17 +106,17 @@ char						 OutBuff[OUTPUT_BUFFER_SIZE];
 float32_t					 FFTInBuff[FFT_LENGTH];
 float32_t					 FFTOutBuff[FFT_LENGTH];
 float32_t					 PowerBuff[HALF_FFT_LENGTH];
-uint16_t					 DecimatedBuff[DECIMATED_LENGTH];
+int16_t					 	 DisplayBuff[NUM_DISPLAY_BINS];
+
 arm_rfft_fast_instance_f32	 fft_handler;
 #endif
+
+
 // Neopixel variables
 TIM_HandleTypeDef htim2;
 DMA_HandleTypeDef hdma_tim2_ch1;
 
-/* For week 7 homework
-int32_t						 DummyGlobal;
-char*						 memPtr;
-*/
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -146,13 +149,72 @@ void DoFFT(float32_t*	inBuff, float32_t*	outBuff, float32_t* powerBuff, arm_rfft
 }
 #endif
 
+// Parameters for post-processing the FFT data to narrow it to the region of interest
+typedef enum {MODE_TOTAL,
+			  MODE_MAX,
+			  MODE_AVERAGE} ProcessingMode;
+
+// Interpolation FFT comes from: https://www.dsprelated.com/showarticle/1156.php
+typedef enum {INTERPOLATION_LINEAR,
+			  INTERPOLATION_NEAREST,
+			  INTERPOLATION_FFT} InterpolationMode;
+
+// Process the FFT data for display - by puting it in the displayBuff, which has NUM_COLS bins. Must supply resolution +
+//  start/stop required frequency resolution
+
+
+
+uint16_t ProcessFFTData(float32_t *dataBuff, uint16_t nDataPoints, int16_t *displayBuff, uint8_t dispWidth, uint8_t dispHeight, uint8_t binSize,
+		                uint16_t binInitial, char* outBuff, ProcessingMode mode) {
+	uint16_t	i, j, binFinal;
+	uint16_t	nFilledBins;
+	float32_t	metric;
+	char		*outPtr;
+	float32_t	*dataPtr;
+
+
+	// We might not have data for all the display columns
+	nFilledBins = fmin((int16_t) ((nDataPoints - binInitial)/binSize), dispWidth);
+	outPtr = outBuff;
+
+	for (i = 0; i < nFilledBins; i++) {
+		metric = 0;
+		dataPtr = dataBuff + i*binSize;
+		switch(mode) {
+			case MODE_TOTAL:
+			case MODE_AVERAGE:
+				for (j = 0; j < binSize; j++) { metric += dataPtr[j]; }
+				if (mode == MODE_AVERAGE) { metric /= binSize; }
+				break;
+			case MODE_MAX:
+				for (j = 0; j < binSize; j++) { metric = fmax(metric, dataPtr[j]); }
+				break;
+
+		}
+		displayBuff[i] = (uint16_t) metric;
+		sprintf(outPtr, "%d:%12d\r\n",i,(uint16_t) metric);
+		outPtr += strlen(outPtr);
+	}
+
+	// Pack the rest of the display columns with (-1 or 0)
+	for (i = nFilledBins; i < dispWidth; i++) {
+		DisplayBuff[i] = -1;
+		sprintf(outPtr, "%d: N/A",i);
+		outPtr += strlen(outPtr);
+	}
+	return outPtr - outBuff; // return #characters in string to send
+}
+
 // Uncomment only one of the options below to choose the
 // method used (total, max or average) to use to aggregate the data
 // in each bin
 // #define DECIMATE_WITH_TOTAL
-//   #define DECIMATE_WITH_MAX
+// #define DECIMATE_WITH_MAX
  #define DECIMATE_WITH_AVERAGE
-uint16_t DecimateFFTData(float32_t *dataBuff, uint16_t* decimatedBuff, char* outBuff, uint16_t npoints, uint16_t nbins) {
+
+// Uncomment below if converting to decibels (20log10)
+//#define DO_DECIBELS
+uint16_t DecimateFFTData(float32_t *dataBuff, uint16_t* DisplayBuff, char* outBuff, uint16_t npoints, uint16_t nbins) {
 	uint16_t 	i, j, binsize;
 	float32_t 	metric;	// Either total or max
 	char		*outBuffPtr;
@@ -177,7 +239,10 @@ uint16_t DecimateFFTData(float32_t *dataBuff, uint16_t* decimatedBuff, char* out
 		metric /= binsize;
 #endif
 		// Format data for UART
-		decimatedBuff[i] = (uint16_t) (metric);
+
+		//metric = 20*log10(metric) // If you want decibels
+
+		DisplayBuff[i] = (uint16_t) (metric);
 		sprintf(outBuffPtr, "%d:%12d\r\n",i,(uint16_t) metric);
 		outBuffPtr += strlen(outBuffPtr);
 	}
@@ -190,19 +255,20 @@ uint16_t DecimateFFTData(float32_t *dataBuff, uint16_t* decimatedBuff, char* out
 float32_t	getSamplingRate(float32_t *fmin, float32_t *fmax, float32_t *fbin) {
 	// Should probably be reading these values from various bits in DFSDM configuration registers,
 	// but this way is much easier to finish in the limited time available
-	const float32_t clockRate 	=	48000000;	// Audio clock rate
+
+	float32_t 	clockRate 		=	hdfsdm1_channel1.Init.OutputClock.Selection == DFSDM_CHANNEL_OUTPUT_CLOCK_SYSTEM ? 110000000: 48000000;	// System or Audio clock rate
 	float32_t	foic 			= 	hdfsdm1_filter0.Init.FilterParam.Oversampling;
 	float32_t	integ 			= 	hdfsdm1_filter0.Init.FilterParam.IntOversampling;
 	float32_t	div				= 	hdfsdm1_channel1.Init.OutputClock.Divider;
 	float32_t 	samplingRate 	= 	clockRate/(foic*integ*div);
 	*fmin = 0;
 	*fmax = samplingRate/2;
-	*fbin = (fmax - fmin)/DECIMATED_LENGTH;
+	*fbin = (*fmax - *fmin)/NUM_DISPLAY_BINS;
 	return samplingRate;
 }
 
 // Standard cyclic rainbow spectrum generator function with uint8_t input
-// Adapted from Adafruit
+// Adapted from Adafruit exanoke
 void wheel(uint8_t index, uint8_t *r, uint8_t *g, uint8_t *b) {
 	index = 255 - index;
 	if (index < 85) {
@@ -238,30 +304,41 @@ void wheel(uint8_t index, uint8_t *r, uint8_t *g, uint8_t *b) {
  * A = 880 = 35
  */
 
-#define NUM_BINS	32
-#define LED_COLUMN_HEIGHT	8
-#define MAX_COLUMN_VAL		LED_COLUMN_HEIGHT - 1
+#define LED_ROWS			8
+#define MAX_PLOT_VAL		LED_ROWS - 1
 // Plots a spectrogram to leds
-void plotFFTData(uint16_t *dataBuff, uint16_t numPoints) {
+void plotFFTData(int16_t *dataBuff) {
 
-	const  	uint8_t			spectrum_colors[LED_COLUMN_HEIGHT][3] =
-											{{17,51,81},{17,81,81},{17,81,51},{17,81,17},
-											 {51,81,17},{81,81,17},{81,51,17},{81,17,17}};
+
 	const 	uint8_t			*color_index;
-	int16_t 		binsize;
-	uint8_t			attenuate = 11;
-	uint8_t			i, scaled_amplitude;
+	int16_t 				index, dataPoint;
+	uint8_t					attenuate = 11;
+	uint8_t					i, scaled_amplitude;
 
-	binsize = numPoints/NUM_BINS;
 	led_set_all_RGB(0,0,0);
+
+	// Run through the data points, scaling to a height of 8 and plot.
+
 	// scale to height of 8 and plot - alternating columns run opposite directions
-	for (i = 0; i < NUM_BINS; i += 2) {
-		scaled_amplitude = (uint8_t) fmin((dataBuff[NUM_BINS - i - 1]*LED_COLUMN_HEIGHT) >> attenuate, MAX_COLUMN_VAL);
-		color_index = spectrum_colors[scaled_amplitude];
-		led_set_RGB(i*LED_COLUMN_HEIGHT + scaled_amplitude, color_index[0], color_index[1], color_index[2]);
-		scaled_amplitude = (uint8_t) fmin((dataBuff[NUM_BINS - i]*LED_COLUMN_HEIGHT) >> attenuate, MAX_COLUMN_VAL);
-		color_index = spectrum_colors[scaled_amplitude];
-		led_set_RGB((i+2)*8 - (scaled_amplitude+1), color_index[0], color_index[1], color_index[2]);
+	for (i = 0; i < LED_COLS; i += 2) {
+
+		index = (LED_COLS - i)- 1;
+		dataPoint = dataBuff[index];
+		if (dataPoint > 0) {
+			scaled_amplitude = (uint8_t) fmin((dataPoint*LED_ROWS) >> attenuate, MAX_PLOT_VAL);
+			//color_index = RowColors[scaled_amplitude];
+			color_index = ColumnColors[i];
+			led_set_RGB(i*LED_ROWS + scaled_amplitude, color_index[0], color_index[1], color_index[2]);
+		}
+
+		index = (LED_COLS - i) - 2;
+		dataPoint = dataBuff[index];
+		if (dataPoint > 0) {
+			scaled_amplitude = (uint8_t) fmin(dataPoint*LED_ROWS >> attenuate, MAX_PLOT_VAL);
+			//color_index = RowColors[scaled_amplitude];
+			color_index = ColumnColors[i+1];
+			led_set_RGB((i+2)*LED_ROWS - (scaled_amplitude+1), color_index[0], color_index[1], color_index[2]);
+		}
 	}
 	led_render();
 }
@@ -274,12 +351,66 @@ void ledTest() {
 	led_set_all_RGB(0,0,0);
 	wheel(color_index, &r, &g, &b);
 	color_index = (color_index + 1) % 255;
-	for (i = 0; i < NUM_BINS; i++) {
-		led_set_RGB(i*LED_COLUMN_HEIGHT + start_i, r, g, b);
+	for (i = 0; i < LED_COLS; i++) {
+		led_set_RGB(i*LED_ROWS + start_i, r, g, b);
 	}
-	start_i = (start_i + 1) % LED_COLUMN_HEIGHT;
+	start_i = (start_i + 1) % LED_ROWS;
 	led_render();
 }
+
+// Ascii codes for arrows:
+//  up 	= 72
+//  down 	= 80
+//  left 	= 75
+//  right = 77
+// Code to handle incoming data
+void handleUARTRequest(char request, char *msgBuff) {
+	  char* msgPtr;
+	  sprintf(msgBuff, "Process char %c\r\n",request);
+	  msgPtr = msgBuff + strlen(msgBuff);
+	  switch(request) {
+			case 's':
+				break;
+			case 'd':
+				break;
+			case 72:	//Up arrow
+				break;
+			case 80:	//Down arrow
+				break;
+			case 75:	//Left arrow
+				break;
+			case 77:	//Right arrow
+				break;
+			case '+':
+				DisplayBinWidth = fmin(DisplayBinWidth + 1, 10);
+				initializeColumnColors(0, HALF_FFT_LENGTH, DisplayBinWidth);		// Initialize the color array
+				sprintf(msgPtr, "DisplayBinWidth = %d\r\n", DisplayBinWidth);
+				break;
+			case '-':
+				DisplayBinWidth = fmax(DisplayBinWidth - 1, 1);
+				initializeColumnColors(0, HALF_FFT_LENGTH, DisplayBinWidth);		// Initialize the color array
+				sprintf(msgPtr, "DisplayBinWidth = %d\r\n", DisplayBinWidth);
+				break;
+	  }
+}
+
+// Precompute the base level color for each of the columns
+// Because the indixes in the display run from high pixel at left to
+// low pixel at right display is reversed for the LED matrix, we
+// need to fill the column colors in revere order
+void initializeColumnColors(uint16_t firstDataPoint, uint16_t numDataPoints, uint16_t binSize) {
+	uint8_t 	r, g, b;
+	uint16_t 	i, index;
+
+	for (i = 0; i < LED_COLS; i++) {
+		index = (255*(firstDataPoint + i*binSize))/(numDataPoints-1);
+		wheel((uint8_t) index, &r, &g, &b);
+		ColumnColors[LED_COLS-i-1][0] = r;
+		ColumnColors[LED_COLS-i-1][1] = g;
+		ColumnColors[LED_COLS-i-1][2] = b;
+	}
+}
+
 
 
 /* USER CODE END PFP */
@@ -301,7 +432,8 @@ int main(void)
 	  uint16_t 		outStringLen;
 	  float32_t*	fftBuffPtr;
 	  float32_t		average, srate, fmin, fmax, fbin;
-	  const uint8_t ATTENUATION =8;
+	  const uint8_t ATTENUATION =8;  // Usually 8
+
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -335,30 +467,18 @@ int main(void)
   {
     Error_Handler();
   }
-  /*** Homework week 7
-  // Homework assignment
-  sprintf(commBuff, "***\r\nGlobal var DummyGlobal has address: 0x%x\r\n", (int) &DummyGlobal);
-  while (HAL_OK != HAL_UART_Transmit_DMA(&huart3, (uint8_t *) commBuff, strlen(commBuff))) {
-  }
-  HAL_Delay(200);
-  memPtr = (char *) malloc(16);
-  sprintf(commBuff, "Allocated 16 bytes on heap at address: 0x%x\r\n", (int) &memPtr);
-  while (HAL_OK != HAL_UART_Transmit_DMA(&huart3, (uint8_t *) commBuff, strlen(commBuff))) {
-  }
-  free(memPtr);
-  HAL_Delay(200);
-  printArgAddress(42);
-  HAL_Delay(200);
-  End Homework Week 7***/
+
+
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-#ifdef DO_FFT
+
   arm_rfft_fast_init_f32(&fft_handler, FFT_LENGTH);
-  led_set_all_RGB(0,0,0);  // If using neopxiels set them all to zero
-#endif
+  led_set_all_RGB(0,0,0);  		// If using neopxiels set them all to zero
+  initializeColumnColors(0, HALF_FFT_LENGTH, DisplayBinWidth);		// Initialize the color array
+
   while (1)
   {
 
@@ -367,10 +487,15 @@ int main(void)
     		RXDataIncoming = 0;
 	  	} else if  (RXDataComplete) {
 	  		srate = getSamplingRate(&fmin, &fmax, &fbin);
-	  		sprintf(commBuff, "Sampling rate = %12.2f Hz\r\nMin freq = %12.2f Hz\r\n Max freq = %12.2f Hz\r\n Freq bin size = %12.2f Hz\r\n", srate, fmin, fmax, fbin);
+	  		sprintf(commBuff, "Sampling rate = %12.2f Hz\r\nMin freq = %12.2f Hz\r\nMax freq = %12.2f Hz\r\nFreq bin size = %12.2f Hz\r\n", srate, fmin, fmax, fbin);
 	    	HAL_UART_Transmit_DMA(&huart3, (uint8_t *) commBuff, strlen(commBuff));
 	    	RXDataComplete = 0;
 	    }
+	  	if (RXCmd) {
+	  		handleUARTRequest(RXCmd, commBuff);
+	  		RXCmd = 0;
+	  		HAL_UART_Transmit_DMA(&huart3, (uint8_t *) commBuff, strlen(commBuff));
+	  	}
 
 	    if(DmaRecHalfBuffCplt == 1)
 	    {
@@ -385,16 +510,19 @@ int main(void)
 	    	}
 
 	    	DoFFT(FFTInBuff, FFTOutBuff, PowerBuff, &fft_handler);
-	    	outStringLen = DecimateFFTData(PowerBuff, DecimatedBuff, OutBuff, HALF_FFT_LENGTH, LED_COLS);
+	    	outStringLen =
+	    			//DecimateFFTData(PowerBuff, DisplayBuff, OutBuff, HALF_FFT_LENGTH, LED_COLS);
+	    			ProcessFFTData(PowerBuff, HALF_FFT_LENGTH, DisplayBuff, LED_COLS, LED_ROWS, DisplayBinWidth, 0, OutBuff, MODE_AVERAGE);
+
 	    	// only send data if resource is free - otherwise skip
 			if (DoSerialOutput) {
 				if (DmaSentHalfBuffCplt) {
 					  DmaSentHalfBuffCplt = 0;
-					  HAL_UART_Transmit_DMA(&huart3, (uint8_t *) OutBuff, outStringLen);
+ 					  HAL_UART_Transmit_DMA(&huart3, (uint8_t *) OutBuff, outStringLen);
 				  }
 			}
 
-			plotFFTData(DecimatedBuff, DECIMATED_LENGTH);
+			plotFFTData(DisplayBuff);
 			//ledTest();
 	    	DmaRecHalfBuffCplt  = 0;
   	  }
@@ -411,7 +539,9 @@ int main(void)
 	  	  }
 
 		  DoFFT(FFTInBuff, FFTOutBuff, PowerBuff, &fft_handler);
-		  outStringLen = DecimateFFTData(PowerBuff, DecimatedBuff, OutBuff, HALF_FFT_LENGTH, LED_ROWS);
+	      outStringLen =
+	    			//DecimateFFTData(PowerBuff, DisplayBuff, OutBuff, HALF_FFT_LENGTH, LED_COLS);
+	    			ProcessFFTData(PowerBuff, HALF_FFT_LENGTH, DisplayBuff, LED_COLS, LED_ROWS, DisplayBinWidth, 0, OutBuff, MODE_AVERAGE);
 		  if (DoSerialOutput) {
 			  // only send data if buffer is free, otherwise skip
 			  if (DmaSentBuffCplt) {
@@ -420,7 +550,7 @@ int main(void)
 			  }
 		  }
 
-		  plotFFTData(DecimatedBuff, DECIMATED_LENGTH);
+		  plotFFTData(DisplayBuff);
 		  //ledTest();
 	      DmaRecBuffCplt  = 0;
 	  }
@@ -449,9 +579,7 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_MSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_MSI;
   RCC_OscInitStruct.MSIState = RCC_MSI_ON;
   RCC_OscInitStruct.MSICalibrationValue = RCC_MSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.MSIClockRange = RCC_MSIRANGE_11;
@@ -592,6 +720,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 	    		rxIndex = 0;
 	    	} else {
 	    		rxBuff[rxIndex++] = rxByte;
+	    		RXCmd = rxByte;
 	    	}
 	    } else {
 	    	RXDataIncoming = 0;
