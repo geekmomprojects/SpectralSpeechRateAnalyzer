@@ -76,10 +76,10 @@ __IO uint32_t                DmaRecHalfBuffCplt  = 0;
 __IO uint32_t                DmaRecBuffCplt      = 0;
 __IO uint32_t				 DmaSentHalfBuffCplt = 1;
 __IO uint32_t				 DmaSentBuffCplt     = 1;
-__IO uint32_t				 DoSerialOutput 	 = 1;
+__IO uint32_t				 DoDataProcessing 	 = 1;
 __IO uint32_t				 debouncing 	 	 = 0;
 __IO uint32_t				 RXDataIncoming 	 = 0;
-__IO uint32_t				 RXDataComplete   	 = 0;
+__IO uint32_t				 RXDataEnabled   	 = 0;
 __IO uint32_t				 rxIndex			 = 0;
 __IO char					 RXCmd				 = 0;
 
@@ -90,7 +90,6 @@ uint8_t						 ColumnColors[LED_COLS][3];
 HAL_StatusTypeDef 			 sts;
 // Buffer to receive user commands via USART
 char						 rxByte;
-char						 rxBuff[64];
 char						 commBuff[256];
 // Buffer to send FFT Data to computer over serial
 char						 OutBuff[OUTPUT_DATA_BUFF_LEN];
@@ -112,7 +111,7 @@ typedef enum {MODE_TOTAL,
 			  MODE_MAX,
 			  MODE_AVERAGE} ProcessingMode;
 
-			  /*
+/* Not implemented
 // Interpolation FFT comes from: https://www.dsprelated.com/showarticle/1156.php
 typedef enum {INTERPOLATION_LINEAR,
 			  INTERPOLATION_NEAREST,
@@ -123,13 +122,12 @@ typedef enum {INTERPOLATION_LINEAR,
 typedef struct DisplayParameters {
 	uint16_t			displayWidth;
 	uint16_t			displayHeight;
-	uint16_t			binWidth;	//# of data points aggregated per display bin
+	uint16_t			binWidth;	        //# of data points aggregated per display bin
 	uint16_t			nFilledBins;
 	uint16_t			firstBinPosition;
 	int16_t				*displayBuff;
 	uint8_t				**colColors;
 	ProcessingMode		dataMode;
-
 } DispParamStruct;
 
 DispParamStruct		DisplayParams = {
@@ -143,7 +141,7 @@ DispParamStruct		DisplayParams = {
 	MODE_AVERAGE
 };
 
-// Store console write params
+// Parameters to control which data is written to the console
 typedef struct ConsoleParameters {
 	char*				writeBuffer;
 	uint16_t			outputColVals;
@@ -160,7 +158,7 @@ ConsoleParamStruct	ConsoleParams = {
 		1,  // outputDisplayRange
 };
 
-// Store FFT Parameters
+// Parameters for use with the FFT input/output/analysis data
 typedef struct FFTParameters {
 	uint16_t					numDataPoints;
 	uint16_t					halfNumDataPoints;
@@ -209,8 +207,7 @@ void SystemClock_Config(void);
 // and the width of a bin in Hz
 float32_t	getSamplingRate(uint16_t *fmin, uint16_t *fmax) {
 	// Should probably be reading these values from various bits in DFSDM configuration registers,
-	// but this way is much easier to finish in the limited time available
-
+	// but this is much easier to implement
 	float32_t 	clockRate 		=	hdfsdm1_channel1.Init.OutputClock.Selection == DFSDM_CHANNEL_OUTPUT_CLOCK_SYSTEM ? 110000000: 48000000;	// System or Audio clock rate
 	float32_t	foic 			= 	hdfsdm1_filter0.Init.FilterParam.Oversampling;
 	float32_t	integ 			= 	hdfsdm1_filter0.Init.FilterParam.IntOversampling;
@@ -221,6 +218,7 @@ float32_t	getSamplingRate(uint16_t *fmin, uint16_t *fmax) {
 	return samplingRate;
 }
 
+// If the size of the FFT input data array changes, update the dependent descriptors
 void updateFFTParamVals(uint16_t numData) {	// If numData is zero, keep existing dataPointValues
 
 	if (numData) {
@@ -234,7 +232,7 @@ void updateFFTParamVals(uint16_t numData) {	// If numData is zero, keep existing
 }
 
 
-
+// Calls the CMSIS functions to compute the FFT and the magnitude of the returned frequency data
 void DoFFT(FFTParamStruct *fftParams) {
 
 	// Do FFT
@@ -242,8 +240,9 @@ void DoFFT(FFTParamStruct *fftParams) {
 	int16_t timerVal16 = __HAL_TIM_GET_COUNTER(&htim16);
 	arm_rfft_fast_f32(fftParams->handler, fftParams->inBuff, fftParams->outBuff, 0);
 	// Compute magnitude of the complex return values. powerBuff has half the number
-	fftParams->LastFFTComputationTimeMicros = abs((int)__HAL_TIM_GET_COUNTER(&htim16) - (int) timerVal16);  // Keep timing units in uS for now
 	//  of elements of inBuff/outBuff
+	fftParams->LastFFTComputationTimeMicros = abs((int)__HAL_TIM_GET_COUNTER(&htim16) - (int) timerVal16);  // Keep timing units in uS for now
+
 	arm_cmplx_mag_f32(fftParams->outBuff, fftParams->powerBuff, fftParams->halfNumDataPoints);
 	// Convert to DB
 	//for (i = 0; i < HALF_FFT_LENGTH/2; i++) {
@@ -252,7 +251,7 @@ void DoFFT(FFTParamStruct *fftParams) {
 }
 
 
-
+// Controls which data is sent to the console. Not really implemented yet
 ConsoleParamStruct	ConsoleParameters = {
 		&OutBuff,
 		0,	// outputColVals
@@ -261,10 +260,10 @@ ConsoleParamStruct	ConsoleParameters = {
 		1,  // outputDisplayRange
 };
 
+// TBD - will generate information about what data is being
+// written to the display
 uint16_t MakeDisplayDescriptorString() {
 	char	*outPtr = ConsoleParams.writeBuffer;
-
-
 }
 
 // Generates the string of data to go to the console output
@@ -300,9 +299,19 @@ uint16_t MakeDataDescriptorString() {
 	return outPtr - ConsoleParams.writeBuffer;
 }
 
+// Enables command characters to be received via the terminal, and lights the Red LED to show the state
+void SetDataRX(uint16_t enable) {
+	RXDataEnabled = enable;
+	HAL_GPIO_WritePin(RED_LED_GPIO_Port, RED_LED_Pin, RXDataEnabled ? GPIO_PIN_RESET : GPIO_PIN_SET);
+}
 
+// Enables FFT data processing and sets corresponding LED to show data processing status
+void SetDataProcessing(uint16_t enable) {
+	DoDataProcessing = enable;
+	HAL_GPIO_WritePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin, DoDataProcessing ? GPIO_PIN_RESET : GPIO_PIN_SET);
+}
 
-// Process the FFT data for display - by puting it in the displayBuff, which has NUM_COLS bins. Must supply resolution +
+// Process the FFT data for LED grid display - by puting it in the displayBuff, which has NUM_COLS bins. Must supply resolution +
 //  start/stop required frequency resolution
 void ProcessFFTData(FFTParamStruct *fftParams, DispParamStruct *dispParams) {
 	uint16_t	i, j, dataBinSize;
@@ -311,14 +320,15 @@ void ProcessFFTData(FFTParamStruct *fftParams, DispParamStruct *dispParams) {
 	float32_t	*dataPtr;
 
 
-	// We might not have data for all the display columns
+	// We might not have data for all the display columns, so nFilled bins is how many of the columns
+	// in the LED matrix will display  a signal
 	dataBinSize = dispParams->binWidth;
 	nFilledBins = fmin((int16_t) ((fftParams->halfNumDataPoints - dispParams->firstBinPosition)/dataBinSize), LED_COLS);
 
 
 	for (i = 0; i < nFilledBins; i++) {
 		metric = 0;
-		dataPtr = fftParams->powerBuff + i*dataBinSize;
+		dataPtr = fftParams->powerBuff + dispParams->firstBinPosition + i*dataBinSize;
 		switch(dispParams->dataMode) {
 			case MODE_TOTAL:
 			case MODE_AVERAGE:
@@ -342,8 +352,8 @@ void ProcessFFTData(FFTParamStruct *fftParams, DispParamStruct *dispParams) {
 
 
 
-// Standard cyclic rainbow spectrum generator function with uint8_t input
-// Adapted from Adafruit example
+// Standard cyclic rainbow spectrum generator function with uint8_t input Adapted from Adafruit example at:
+// https://learn.adafruit.com/multi-tasking-the-arduino-part-3/utility-functions
 void wheel(uint8_t index, uint8_t *r, uint8_t *g, uint8_t *b) {
 	index = 255 - index;
 	if (index < 85) {
@@ -367,22 +377,9 @@ void wheel(uint8_t index, uint8_t *r, uint8_t *g, uint8_t *b) {
 // Standard audio sampling is 44 kHz, but I want only vocal range frequencies
 // Then each bin is 6.5 kHz/256 = 25.4 hZ wide, and the values run from 0->6500 Hz.
 // we'll pick values for musical notes for our 8 bins.
-/**
- * Note Freq bin
- * A = 440 = 17
- * B = 494 = 19
- * C = 523 = 21
- * D = 587 = 23
- * E = 659 = 25
- * F = 698 = 27
- * G = 784 = 31
- * A = 880 = 35
- */
-
-
 #define MAX_PLOT_VAL		LED_ROWS - 1
 // Computes the actual pixel value for our snake-layout 8x32 LED matrix which currently
-// has zero valued pixel on the left
+// has zero valued pixel on the left side of the display
 #define pixel_pos_even_col(X,Y)   (X+2)*LED_ROWS - (Y + 1)
 #define pixel_pos_odd_col(X,Y)  X*LED_ROWS + Y
 // Plots a spectrogram to leds
@@ -391,13 +388,13 @@ void plotFFTData(int16_t *dataBuff) {
 
 	const 	uint8_t			*color_index;
 	int16_t 				dataPoint;
-	uint8_t					attenuate = 11;
+	uint8_t					attenuate = 11;  // TBD: create dynamic amplitude scaling
 	uint8_t					i, scaled_amplitude;
 
-	// Clear old leds
+	// Clear old LEDs
 	led_set_all_RGB(0,0,0);
 
-	// scale to height of 8 and plot - alternating columns run opposite directions
+	// scale to display height and plot - alternating columns run opposite directions
 	for (i = 0; i < LED_COLS; i += 2) {
 		// Data order reversed from display order
 		dataPoint = dataBuff[(LED_COLS - i)- 1];
@@ -417,6 +414,7 @@ void plotFFTData(int16_t *dataBuff) {
 	led_render();
 }
 
+// Simple test to verify the WS2812B control code is working
 void ledTest() {
 	static uint8_t color_index = 0, r, g, b;
 	static uint8_t start_i = 0;
@@ -433,41 +431,88 @@ void ledTest() {
 }
 
 
-// Code to handle incoming UART data - single character commands
-void handleUARTRequest(char request, char *msgBuff, DispParamStruct *dispParams, FFTParamStruct *fftParams) {
-	  char* msgPtr;
-	  sprintf(msgBuff, "Process char %c\r\n",request);
-	  msgPtr = msgBuff + strlen(msgBuff);
+// Code to handle incoming UART data incoming as single character commands
+uint16_t handleUARTRequest(char request, char *msgBuff, DispParamStruct *dispParams, FFTParamStruct *fftParams) {
+	  uint16_t	dispBinFreqWidth, firstBin, lastBin;
+	  uint16_t	printInstr = 0;
+	  uint16_t	replotData = 0;
+	  char* 	msgPtr;
+
+
+
 	  switch(request) {
-			case 's':
+			case 't':	// Toggle real time FFT data processing on/off
+				SetDataProcessing(!DoDataProcessing);
 				break;
-			case 'd':
+			case 'r':	// Reset display parameters to base balues
+				dispParams->firstBinPosition = 0;
+				dispParams->binWidth = fftParams->halfNumDataPoints/dispParams->displayWidth;
+				replotData = 1;
 				break;
-			case 72:	//Up arrow
+			case 'a':	// Shift displayed spectrum left
+				dispParams->firstBinPosition = fmin(dispParams->firstBinPosition + dispParams->binWidth, fftParams->halfNumDataPoints - dispParams->binWidth);
+				replotData = 1;
 				break;
-			case 80:	//Down arrow
+			case 'd':	// Shift displayed spectrum right
+				dispParams->firstBinPosition = fmax(dispParams->firstBinPosition - dispParams->binWidth, 0);
+				replotData = 1;
 				break;
-			case 75:	//Left arrow
+			case 'w':   // Widen display frequency bins
+				dispParams->binWidth = fmin(dispParams->binWidth + 1,36);  // TBD: replace arbitrary max binsize value
+				replotData = 1;
 				break;
-			case 77:	//Right arrow
-				break;
-			case '+':
-				dispParams->binWidth = fmin(dispParams->binWidth + 1,10);
-				initializeColumnColors(&FFTParams, &DisplayParams);		// Initialize the color array
-				sprintf(msgPtr, "Display bin size: %12d Hz\r\n", fftParams->freqResolution*dispParams->binWidth);
-				break;
-			case '-':
+			case 's':	// Narrow display frequency bins
 				dispParams->binWidth = fmax(dispParams->binWidth - 1, 1);
-				initializeColumnColors(&FFTParams, &DisplayParams);		// Initialize the color array
-				sprintf(msgPtr, "Display bin size: %12d Hz\r\n", fftParams->freqResolution*dispParams->binWidth);
+				replotData = 1;
 				break;
+			default:
+				printInstr = 1;
+				break;
+
 	  }
+	  if (replotData) {
+	      ProcessFFTData(fftParams, dispParams);
+		  initializeColumnColors(fftParams, dispParams);
+		  plotFFTData(DisplayBuff);
+	  }
+
+	  // Prepare output string for console
+	  msgPtr = msgBuff;
+	  sprintf(msgPtr, "Request %c\r\n",request);
+	  msgPtr += strlen(msgPtr);
+	  if (printInstr) {
+		sprintf(msgPtr,  "Option \"%c\" not recognized.\r\n"
+						 "t: toggle FFT\r\n"
+						 "r: reset display\r\n"
+						 "a: shift data left\r\n"
+						 "d: shift data right\r\n"
+						 "w: widen freq bins\r\n"
+						 "s: narrow freq bins\r\n\r\n",
+						 request);
+		msgPtr += strlen(msgPtr);
+	  } else  {
+		  dispBinFreqWidth = fftParams->freqResolution*dispParams->binWidth;
+		  firstBin = fftParams->freqResolution*dispParams->firstBinPosition;
+		  lastBin = firstBin + dispBinFreqWidth*dispParams->displayWidth;
+		  sprintf(msgPtr, "Bin size:  %12d Hz\r\n"
+						  "First bin: %12d Hz\r\n"
+						  "Last bin:  %12d Hz\r\n\r\n",
+						  dispBinFreqWidth,
+						  firstBin,
+						  lastBin);
+		  msgPtr += strlen(msgPtr);
+	  }
+	  return msgPtr - msgBuff;
 }
 
 // Precompute the base level color for each of the columns
-// Because the indixes in the display run from high pixel at left to
+// Its more efficient to associate the RGB color with a specific
+// column in the display than with a specific frequency in the
+// data. We just need to recompute which color goes with which
+// column when the display parameters change.
+// Because the indices in the display run from high pixel at left to
 // low pixel at right display is reversed for the LED matrix, we
-// need to fill the column colors in revere order
+// need to fill the column colors in reverse order
 void initializeColumnColors(FFTParamStruct *fftParams, DispParamStruct *dispParams) {
 //uint16_t firstDataPoint, uint16_t numDataPoints, uint16_t binSize) {
 	uint8_t 	r, g, b;
@@ -480,10 +525,6 @@ void initializeColumnColors(FFTParamStruct *fftParams, DispParamStruct *dispPara
 		ColumnColors[LED_COLS-i-1][1] = g;
 		ColumnColors[LED_COLS-i-1][2] = b;
 	}
-}
-
-void StopDFDSMDMA() {
-
 }
 
 
@@ -505,7 +546,6 @@ int main(void)
 	  int32_t		satVal;
 	  uint16_t 		outStringLen;
 	  float32_t*	fftBuffPtr;
-	  float32_t		average, srate, fmin, fmax, fbin;
 	  const uint8_t ATTENUATION =8;  // Usually 8
 
   /* USER CODE END 1 */
@@ -554,76 +594,78 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
-  led_set_all_RGB(0,0,0);  								// Start all Neopixels Off
-  initializeColumnColors(&FFTParams, &DisplayParams);		// Initialize the color array
+  led_set_all_RGB(0,0,0);  												// Start all Neopixels Off
+  initializeColumnColors(&FFTParams, &DisplayParams);					// Initialize the color array
+  SetDataProcessing(1);													// Start in data processing mode
+  SetDataRX(0);															// Start with command RX disabled
 
   while (1)
   {
-	  	// TBD - fix up the handling of RX transmission data TBD: combine this and RXCmd
-	  	if (RXDataIncoming) {
-	  		// If we just got a character , fire up the receiver for the next one
-    		sts = HAL_UART_Receive_IT(&huart3, &rxByte, 1);
-    		RXDataIncoming = 0;
-	  	} else if  (RXDataComplete) {
-	  		// Whatever is in here happens if a return character is caught
-	    	RXDataComplete = 0;
-	    }
+	  	// Check to see if there is a user request to handle
 	  	if (RXCmd) {
-	  		handleUARTRequest(RXCmd, commBuff, &DisplayParams, &FFTParams);
+	  		outStringLen = handleUARTRequest(RXCmd, commBuff, &DisplayParams, &FFTParams);
 	  		RXCmd = 0;
-	  		HAL_UART_Transmit_DMA(&huart3, (uint8_t *) commBuff, strlen(commBuff));
+	  		HAL_UART_Transmit_DMA(&huart3, (uint8_t *) commBuff, outStringLen);
+	  		// Enable receipt of additional console commands. TBD check return status
+    		sts = HAL_UART_Receive_IT(&huart3, &rxByte, 1);
 	  	}
 
+	  	// First half of DMA buffer filled with audio data
 	    if(DmaRecHalfBuffCplt == 1)
 	    {
+	    	// Copy data to array for FFT input
 	    	fftBuffPtr = FFTInBuff;
-	    	average = 0;
-	    	/* Store values on Play buff */
 	    	for(i = 0; i < FFTParams.numDataPoints; i++) {
 	    		// Saturate data values and copy them into the array
 	    		satVal 			  = SaturaLH((RecBuff[i] >> ATTENUATION), -32768, 32767);
 	    		*(fftBuffPtr++) = satVal;
 	    	}
 
-	    	DoFFT(&FFTParams);
-	    	ProcessFFTData(&FFTParams, &DisplayParams);
-
-	    	// only send data if resource is free - otherwise skip
-			if (DoSerialOutput) {
-				outStringLen = MakeDataDescriptorString();
-				if (DmaSentHalfBuffCplt) {
-					  DmaSentHalfBuffCplt = 0;
- 					  HAL_UART_Transmit_DMA(&huart3, (uint8_t *) OutBuff, outStringLen);
-				  }
+			if (DoDataProcessing) {
+		    	DoFFT(&FFTParams);
+		    	if (!RXDataEnabled) {  // Transmit stats to console only if console is NOT in data RX mode
+					outStringLen = MakeDataDescriptorString();
+					// only send descriptive data to console if buffer is free, otherwise skip
+					if (DmaSentHalfBuffCplt) {
+						  DmaSentHalfBuffCplt = 0;
+						  HAL_UART_Transmit_DMA(&huart3, (uint8_t *) OutBuff, outStringLen);
+					}
+		    	}
 			}
 
+			// Prepare data (old or newly acquired) for the display
+	    	ProcessFFTData(&FFTParams, &DisplayParams);
 			plotFFTData(DisplayBuff);
 			//ledTest();
 	    	DmaRecHalfBuffCplt  = 0;
   	  }
+
+	  // Second half of buffer filled with audio data
 	  if(DmaRecBuffCplt == 1)
 	  {
-
+		  // Copy data to array for FFT input
 		  fftBuffPtr = FFTInBuff;
-		  /* Store values on Play buff */
-		  average = 0;
 		  for(i = FFTParams.numDataPoints; i < 2*FFTParams.numDataPoints; i++) {
 			  	satVal 			  = SaturaLH((RecBuff[i] >> ATTENUATION), -32768, 32767);
 			  	*(fftBuffPtr++) = satVal;
 	  	  }
 
-		  DoFFT(&FFTParams);
-	      ProcessFFTData(&FFTParams, &DisplayParams);
 
-	      if (DoSerialOutput) {
-	    	  outStringLen = MakeDataDescriptorString();
-			  // only send data if buffer is free, otherwise skip
-			  if (DmaSentBuffCplt) {
-				  DmaSentBuffCplt = 0;
-				  HAL_UART_Transmit_DMA(&huart3, (uint8_t *) OutBuff, outStringLen);
+
+	      if (DoDataProcessing) {
+			  DoFFT(&FFTParams);
+			  if (!RXDataEnabled) {	// Transmit stats regularly only if not receiving data
+				  outStringLen = MakeDataDescriptorString();
+				  // only send descriptive data to console if buffer is free, otherwise skip
+				  if (DmaSentBuffCplt) {
+					  DmaSentBuffCplt = 0;
+					  HAL_UART_Transmit_DMA(&huart3, (uint8_t *) OutBuff, outStringLen);
+				  }
 			  }
 		  }
 
+	      // Prepare data (old or newly acquired) for the display
+	      ProcessFFTData(&FFTParams, &DisplayParams);
 		  plotFFTData(DisplayBuff);
 		  //ledTest();
 	      DmaRecBuffCplt  = 0;
@@ -684,37 +726,7 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
-/*
-// Fast hsl2rgb algorithm: https://stackoverflow.com/questions/13105185/fast-algorithm-for-rgb-hsl-conversion
-uint32_t hsl_to_rgb(uint8_t h, uint8_t s, uint8_t l) {
-	if(l == 0) return 0;
 
-	volatile uint8_t  r, g, b, lo, c, x, m;
-	volatile uint16_t h1, l1, H;
-	l1 = l + 1;
-	if (l < 128)    c = ((l1 << 1) * s) >> 8;
-	else            c = (512 - (l1 << 1)) * s >> 8;
-
-	H = h * 6;              // 0 to 1535 (actually 1530)
-	lo = H & 255;           // Low byte  = primary/secondary color mix
-	h1 = lo + 1;
-
-	if ((H & 256) == 0)   x = h1 * c >> 8;          // even sextant, like red to yellow
-	else                  x = (256 - h1) * c >> 8;  // odd sextant, like yellow to green
-
-	m = l - (c >> 1);
-	switch(H >> 8) {       // High byte = sextant of colorwheel
-	 case 0 : r = c; g = x; b = 0; break; // R to Y
-	 case 1 : r = x; g = c; b = 0; break; // Y to G
-	 case 2 : r = 0; g = c; b = x; break; // G to C
-	 case 3 : r = 0; g = x; b = c; break; // C to B
-	 case 4 : r = x; g = 0; b = c; break; // B to M
-	 default: r = c; g = 0; b = x; break; // M to R
-	}
-
-	return (((uint32_t)r + m) << 16) | (((uint32_t)g + m) << 8) | ((uint32_t)b + m);
-}
-*/
 /**
   * @brief  Regular conversion complete callback.
   * @note   In interrupt mode, user has to read conversion value in this function
@@ -781,24 +793,14 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
  	if (huart == &huart3) {
 		// If no data is being received, clear the buffer
-		// Right now just toggle LED to see if anything is noticed
-	    //Toggle LED10
-	    HAL_GPIO_TogglePin(GREEN_LED_GPIO_Port, GREEN_LED_Pin);
 	    // Enable receiving of data via UART and interrupt notification
 
-	    if (!DoSerialOutput) {
+	    if (RXDataEnabled) {
 	    	RXDataIncoming = 1;
-	    	if (rxByte == '\r') {
-	    		rxBuff[rxIndex] = '\0';
-	    		// Now respond to input
-	    		RXDataComplete = 1;
-	    		rxIndex = 0;
-	    	} else {
-	    		rxBuff[rxIndex++] = rxByte;
-	    		RXCmd = rxByte;
-	    	}
+	    	RXCmd = rxByte;
 	    } else {
 	    	RXDataIncoming = 0;
+	    	RXCmd = 0;
 	    }
 	}
 }
@@ -833,13 +835,13 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 		debouncing = 0;
 		HAL_TIM_Base_Stop_IT(&htim3);
 		// If we're here, the button is debounced and we should toggle the state
-		if (HAL_GPIO_ReadPin(GPIOC, 13) == GPIO_PIN_RESET) {	// Button is pushed
-			DoSerialOutput = !DoSerialOutput;
-			if (!DoSerialOutput) {
-				// Enable receiving of data via UART and interrupt notification
-				RXDataIncoming = 1;
+		if (HAL_GPIO_ReadPin(PUSH_BUTTON_GPIO_Port, PUSH_BUTTON_Pin) == GPIO_PIN_RESET) {	// Button is pushed
+			SetDataRX(!RXDataEnabled);
+			if (RXDataEnabled) {	// Prepare to read characters from UART
+				HAL_UART_Receive_IT(&huart3, &rxByte, 1);
 			} else {
-				RXDataIncoming = 0;
+				// If we're exiting data RX mode, make sure data processing is enabled
+				SetDataProcessing(1);
 			}
 		}
 	}

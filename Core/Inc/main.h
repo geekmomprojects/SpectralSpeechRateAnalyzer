@@ -66,6 +66,8 @@ void Error_Handler(void);
 #define PUSH_BUTTON_Pin GPIO_PIN_13
 #define PUSH_BUTTON_GPIO_Port GPIOC
 #define PUSH_BUTTON_EXTI_IRQn EXTI13_IRQn
+#define RED_LED_Pin GPIO_PIN_3
+#define RED_LED_GPIO_Port GPIOD
 #define DFSDM_CLKOUT_Pin GPIO_PIN_7
 #define DFSDM_CLKOUT_GPIO_Port GPIOG
 #define Neopixel_PWM_Pin GPIO_PIN_0
