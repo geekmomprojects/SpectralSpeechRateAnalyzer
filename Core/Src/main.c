@@ -164,7 +164,7 @@ ConsoleParamStruct	ConsoleParams = {
 typedef struct FFTParameters {
 	uint16_t					numDataPoints;
 	uint16_t					halfNumDataPoints;
-	uint16_t					zeroPad; 	// if nonZero, the last "zeroPad" elements of the array are zero-padded
+	uint16_t					zeroPad; 	// if nonZero, the last "zeroPad" elements of the array are zero-padded [not implemented]
 	uint32_t					LastFFTComputationTimeMicros;
 	uint16_t					sampleRateHZ;
 	float32_t   				*inBuff;
@@ -432,12 +432,8 @@ void ledTest() {
 	led_render();
 }
 
-// Ascii codes for arrows:
-//  up 	= 72
-//  down 	= 80
-//  left 	= 75
-//  right = 77
-// Code to handle incoming data
+
+// Code to handle incoming UART data - single character commands
 void handleUARTRequest(char request, char *msgBuff, DispParamStruct *dispParams, FFTParamStruct *fftParams) {
 	  char* msgPtr;
 	  sprintf(msgBuff, "Process char %c\r\n",request);
@@ -486,6 +482,9 @@ void initializeColumnColors(FFTParamStruct *fftParams, DispParamStruct *dispPara
 	}
 }
 
+void StopDFDSMDMA() {
+
+}
 
 
 /* USER CODE END PFP */
@@ -560,14 +559,13 @@ int main(void)
 
   while (1)
   {
-	  	// TBD - fix up the handling of RX transmission data
+	  	// TBD - fix up the handling of RX transmission data TBD: combine this and RXCmd
 	  	if (RXDataIncoming) {
+	  		// If we just got a character , fire up the receiver for the next one
     		sts = HAL_UART_Receive_IT(&huart3, &rxByte, 1);
     		RXDataIncoming = 0;
 	  	} else if  (RXDataComplete) {
-//	  		srate = getSamplingRate(&fmin, &fmax);
-//	  		sprintf(commBuff, "Sampling rate = %12.2f Hz\r\nMin freq = %12.2f Hz\r\nMax freq = %12.2f Hz\r\nFreq bin size = %12.2f Hz\r\n", srate, fmin, fmax, fbin);
-//	    	HAL_UART_Transmit_DMA(&huart3, (uint8_t *) commBuff, strlen(commBuff));
+	  		// Whatever is in here happens if a return character is caught
 	    	RXDataComplete = 0;
 	    }
 	  	if (RXCmd) {
