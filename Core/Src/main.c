@@ -237,12 +237,13 @@ void DoFFT(FFTParamStruct *fftParams) {
 
 	// Do FFT
 	// Record start time
-	int16_t timerVal16 = __HAL_TIM_GET_COUNTER(&htim16);
+	uint16_t timerVal16 = __HAL_TIM_GET_COUNTER(&htim16);
 	arm_rfft_fast_f32(fftParams->handler, fftParams->inBuff, fftParams->outBuff, 0);
+	// Compute computation time. Prescaler of 1100 means ticks are 10uS each
+	 timerVal16 = __HAL_TIM_GET_COUNTER(&htim16) - timerVal16;  // Keep timing units in uS for now
+	 fftParams->LastFFTComputationTimeMicros = 10*((uint32_t) timerVal16);
 	// Compute magnitude of the complex return values. powerBuff has half the number
 	//  of elements of inBuff/outBuff
-	fftParams->LastFFTComputationTimeMicros = abs((int)__HAL_TIM_GET_COUNTER(&htim16) - (int) timerVal16);  // Keep timing units in uS for now
-
 	arm_cmplx_mag_f32(fftParams->outBuff, fftParams->powerBuff, fftParams->halfNumDataPoints);
 	// Convert to DB
 	//for (i = 0; i < HALF_FFT_LENGTH/2; i++) {
